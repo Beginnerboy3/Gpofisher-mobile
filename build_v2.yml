@@ -1,0 +1,1035 @@
+name: Build APK v2
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write project files
+        run: |
+          mkdir -p gpo_fisher_android/app/src/main/java/com/example/gpofisher gpo_fisher_android/app/src/main/res/xml gpo_fisher_android/app/src/main/res/values
+          cat > gpo_fisher_android/settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "GPOFisher"
+          include(":app")
+          EOF
+          cat > gpo_fisher_android/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+          cat > gpo_fisher_android/gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+          cat > gpo_fisher_android/app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.example.gpofisher"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.gpofisher"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+          }
+          EOF
+          cat > gpo_fisher_android/app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:allowBackup="false"
+                  android:label="GPO Fisher"
+                  android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".FloatingService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+
+                  <service
+                      android:name=".FisherAccessibilityService"
+                      android:exported="true"
+                      android:label="GPO Fisher"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+          cat > gpo_fisher_android/app/src/main/res/xml/accessibility_config.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:description="@string/a11y_desc"
+              android:notificationTimeout="100" />
+          EOF
+          cat > gpo_fisher_android/app/src/main/res/values/strings.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="a11y_desc">Lets GPO Fisher press and hold the screen for you (taps and long-press gestures only).</string>
+          </resources>
+          EOF
+          cat > gpo_fisher_android/app/src/main/java/com/example/gpofisher/MainActivity.kt <<'EOF'
+          package com.example.gpofisher
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+
+          class MainActivity : Activity() {
+              private val reqProjection = 1
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  if (Build.VERSION.SDK_INT >= 33) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 0)
+                  }
+
+                  val col = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(48, 80, 48, 48)
+                  }
+                  fun add(t: String, onClick: () -> Unit) {
+                      col.addView(Button(this).apply {
+                          text = t
+                          isAllCaps = false
+                          setOnClickListener { onClick() }
+                      }, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+                  }
+
+                  col.addView(TextView(this).apply {
+                      textSize = 20f
+                      text = "GPO Fisher"
+                  })
+                  col.addView(TextView(this).apply {
+                      textSize = 14f
+                      setPadding(0, 16, 0, 24)
+                      text = "Do steps 1-3 once. Then open Roblox/GPO and use the floating panel.\n\n" +
+                          "Android 13+: if step 1 is greyed out, open App info > (...) menu > " +
+                          "\"Allow restricted settings\", then try again."
+                  })
+
+                  add("1. Enable accessibility service (GPO Fisher)") {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+                  add("2. Allow display over other apps") {
+                      startActivity(
+                          Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                      )
+                  }
+                  add("3. Start floating panel (asks for screen capture)") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Do step 2 first", Toast.LENGTH_SHORT).show()
+                      } else {
+                          val mpm = getSystemService(MediaProjectionManager::class.java)
+                          startActivityForResult(mpm.createScreenCaptureIntent(), reqProjection)
+                      }
+                  }
+                  add("Stop floating panel") { stopService(Intent(this, FloatingService::class.java)) }
+
+                  setContentView(ScrollView(this).apply { addView(col) })
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == reqProjection && resultCode == RESULT_OK && data != null) {
+                      val i = Intent(this, FloatingService::class.java)
+                          .putExtra("code", resultCode)
+                          .putExtra("data", data)
+                      startForegroundService(i)
+                      Toast.makeText(this, "Panel started. Switch to the game.", Toast.LENGTH_LONG).show()
+                  }
+              }
+          }
+          EOF
+          cat > gpo_fisher_android/app/src/main/java/com/example/gpofisher/FisherAccessibilityService.kt <<'EOF'
+          package com.example.gpofisher
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.accessibilityservice.GestureDescription.StrokeDescription
+          import android.content.Intent
+          import android.graphics.Path
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.accessibility.AccessibilityEvent
+
+          /**
+           * Performs taps and a continuous "press and hold" using chained gesture strokes
+           * (willContinue = true keeps the virtual finger down between chunks).
+           */
+          class FisherAccessibilityService : AccessibilityService() {
+
+              companion object {
+                  @Volatile
+                  var instance: FisherAccessibilityService? = null
+                  private const val CHUNK_MS = 60L
+              }
+
+              private val main = Handler(Looper.getMainLooper())
+              private var holding = false
+              private var chainActive = false
+              private var hx = 0f
+              private var hy = 0f
+
+              override fun onServiceConnected() {
+                  instance = this
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  instance = null
+                  return super.onUnbind(intent)
+              }
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() {}
+
+              fun tap(x: Float, y: Float) {
+                  main.post {
+                      val p = Path().apply { moveTo(x, y) }
+                      val g = GestureDescription.Builder().addStroke(StrokeDescription(p, 0, 25)).build()
+                      dispatchGesture(g, null, null)
+                  }
+              }
+
+              fun hold(x: Float, y: Float) {
+                  main.post {
+                      hx = x; hy = y
+                      holding = true
+                      if (!chainActive) {
+                          chainActive = true
+                          dispatchChunk(null)
+                      }
+                  }
+              }
+
+              fun release() {
+                  main.post { holding = false }
+              }
+
+              private fun dispatchChunk(prev: StrokeDescription?) {
+                  val p = Path().apply { moveTo(hx, hy) }
+                  val stroke = if (prev == null) StrokeDescription(p, 0, CHUNK_MS, true)
+                  else prev.continueStroke(p, 0, CHUNK_MS, true)
+                  val ok = dispatchGesture(
+                      GestureDescription.Builder().addStroke(stroke).build(),
+                      object : GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) {
+                              if (holding) dispatchChunk(stroke) else finish(stroke)
+                          }
+
+                          override fun onCancelled(g: GestureDescription?) {
+                              chainActive = false
+                              if (holding) {
+                                  chainActive = true
+                                  dispatchChunk(null)
+                              }
+                          }
+                      }, null
+                  )
+                  if (!ok) chainActive = false
+              }
+
+              /** Lift the finger: send the final stroke with willContinue = false. */
+              private fun finish(prev: StrokeDescription) {
+                  val p = Path().apply { moveTo(hx, hy) }
+                  val last = prev.continueStroke(p, 0, 10, false)
+                  val ok = dispatchGesture(
+                      GestureDescription.Builder().addStroke(last).build(),
+                      object : GestureResultCallback() {
+                          override fun onCompleted(g: GestureDescription?) = after()
+                          override fun onCancelled(g: GestureDescription?) = after()
+                          private fun after() {
+                              chainActive = false
+                              if (holding) {
+                                  chainActive = true
+                                  dispatchChunk(null)
+                              }
+                          }
+                      }, null
+                  )
+                  if (!ok) chainActive = false
+              }
+          }
+          EOF
+          cat > gpo_fisher_android/app/src/main/java/com/example/gpofisher/FloatingService.kt <<'EOF'
+          package com.example.gpofisher
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Context
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.ServiceInfo
+          import android.content.res.Configuration
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Paint
+          import android.graphics.PixelFormat
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.Image
+          import android.media.ImageReader
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Handler
+          import android.os.HandlerThread
+          import android.os.IBinder
+          import android.os.Looper
+          import android.util.DisplayMetrics
+          import android.view.Gravity
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import kotlin.math.abs
+
+          /**
+           * Floating control panel + screen capture + fishing solver.
+           *
+           * The GPO minigame: a vertical bar made of blue parts with a black gap (the "zone").
+           * Holding click moves the zone UP, releasing lets it fall. A white line (with a fish icon)
+           * marks the fish. Keep the fish inside the zone. (The green bar on the right is just progress.)
+           * So: fish above the zone centre -> hold, fish below -> release.
+           *
+           * Setup (landscape): crosshair on the area -> TL / BR (a box that contains the whole bar, with room
+           * to move), crosshair on a blue part of the bar -> "Blue bar", crosshair on a safe spot -> "Hold pt",
+           * crosshair on the sea -> "Cast pt". Then FISH (minigame only) or LOOP (cast + minigame + recast).
+           */
+          class FloatingService : Service() {
+
+              private class SampleReq(val x: Int, val y: Int, val cb: (Int) -> Unit)
+
+              private lateinit var wm: WindowManager
+              private lateinit var prefs: SharedPreferences
+              private val main = Handler(Looper.getMainLooper())
+              private lateinit var bgThread: HandlerThread
+              private lateinit var bg: Handler
+
+              private var projection: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+
+              // overlay views
+              private lateinit var panel: LinearLayout
+              private lateinit var panelLp: WindowManager.LayoutParams
+              private lateinit var status: TextView
+              private lateinit var cross: View
+              private lateinit var crossLp: WindowManager.LayoutParams
+              private lateinit var box: View
+              private lateinit var boxLp: WindowManager.LayoutParams
+              private var boxAdded = false
+              private val crossSize = 96
+
+              // config (written on main, read on the capture thread)
+              @Volatile private var region: IntArray? = null // l, t, r, b
+              @Volatile private var targetColor: Int? = null
+              @Volatile private var playerColor: Int? = null
+              @Volatile private var holdX = 0f
+              @Volatile private var holdY = 0f
+              @Volatile private var tolerance = 20
+              @Volatile private var invert = false // false: holding moves bar toward smaller coords (up / left)
+              @Volatile private var deadzone = 3.0
+              @Volatile private var lead = 0.05
+              @Volatile private var castX = -1f
+              @Volatile private var castY = -1f
+
+              private enum class Phase { OFF, CAST, WAIT, PLAY, COOL }
+              private companion object {
+                  const val MIN_COL = 15                // a bar column needs this many blue samples (tall bar)
+                  const val MIN_BLUE = 30               // blue samples needed to say "the minigame is on screen"
+                  const val BITE_TIMEOUT_MS = 60_000L   // no bite for this long -> recast
+                  const val LOST_MS = 1_500L            // minigame gone this long -> it ended
+                  const val COOLDOWN_MS = 3_000L        // pause after a catch before recasting
+              }
+
+              // fishing loop state
+              @Volatile private var holdingNow = false
+              private var lastFish = Double.NaN
+              @Volatile private var loopOn = false
+              @Volatile private var phase = Phase.OFF
+              private var phaseSince = 0L
+              private var seen = 0
+              private var lostSince = 0L
+              private var catches = 0
+
+              // runtime state
+              @Volatile private var fishing = false
+              @Volatile private var sampleReq: SampleReq? = null
+              private var prevP = Double.NaN
+              private var prevT = 0L
+              private var lastStatusMs = 0L
+              private var clickerOn = false
+              private var holdOn = false
+              private val clickMs = 100L
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (projection != null || intent == null) return START_NOT_STICKY
+                  startAsForeground()
+
+                  val code = intent.getIntExtra("code", 0)
+                  @Suppress("DEPRECATION")
+                  val data = intent.getParcelableExtra<Intent>("data")
+                  if (data == null) { stopSelf(); return START_NOT_STICKY }
+
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+                  prefs = getSharedPreferences("cfg", MODE_PRIVATE)
+                  bgThread = HandlerThread("capture").also { it.start() }
+                  bg = Handler(bgThread.looper)
+                  loadPrefs()
+
+                  val mpm = getSystemService(MediaProjectionManager::class.java)
+                  projection = mpm.getMediaProjection(code, data).also {
+                      it.registerCallback(object : MediaProjection.Callback() {
+                          override fun onStop() { main.post { stopSelf() } }
+                      }, bg)
+                  }
+                  setupCapture()
+                  buildOverlays()
+                  return START_NOT_STICKY
+              }
+
+              private fun startAsForeground() {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel("gf", "GPO Fisher", NotificationManager.IMPORTANCE_LOW))
+                  val n = Notification.Builder(this, "gf")
+                      .setContentTitle("GPO Fisher running")
+                      .setContentText("Floating panel active")
+                      .setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .build()
+                  if (Build.VERSION.SDK_INT >= 29) {
+                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  } else {
+                      startForeground(1, n)
+                  }
+              }
+
+              // ---------------------------------------------------------------- capture
+
+              private fun realMetrics(): IntArray {
+                  val m = DisplayMetrics()
+                  @Suppress("DEPRECATION")
+                  wm.defaultDisplay.getRealMetrics(m)
+                  return intArrayOf(m.widthPixels, m.heightPixels, m.densityDpi)
+              }
+
+              private fun setupCapture() {
+                  val s = realMetrics()
+                  val old = reader
+                  val r = ImageReader.newInstance(s[0], s[1], PixelFormat.RGBA_8888, 2)
+                  r.setOnImageAvailableListener({ rd -> onFrame(rd) }, bg)
+                  reader = r
+                  if (vd == null) {
+                      vd = projection!!.createVirtualDisplay(
+                          "gpofisher", s[0], s[1], s[2],
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, bg
+                      )
+                  } else {
+                      vd!!.resize(s[0], s[1], s[2])
+                      vd!!.surface = r.surface
+                  }
+                  old?.close()
+              }
+
+              override fun onConfigurationChanged(newConfig: Configuration) {
+                  super.onConfigurationChanged(newConfig)
+                  if (projection != null) {
+                      main.postDelayed({ try { setupCapture() } catch (_: Exception) {} }, 300)
+                  }
+              }
+
+              private fun onFrame(rd: ImageReader) {
+                  val img = try { rd.acquireLatestImage() } catch (e: Exception) { null } ?: return
+                  try { process(img) } finally { img.close() }
+              }
+
+              private fun match(c: Int, ref: Int, tol: Int): Boolean {
+                  return abs(((c shr 16) and 255) - ((ref shr 16) and 255)) <= tol &&
+                      abs(((c shr 8) and 255) - ((ref shr 8) and 255)) <= tol &&
+                      abs((c and 255) - (ref and 255)) <= tol
+              }
+
+              private fun process(img: Image) {
+                  val plane = img.planes[0]
+                  val buf = plane.buffer
+                  val rs = plane.rowStride
+                  val w = img.width
+                  val h = img.height
+                  fun px(x: Int, y: Int): Int {
+                      val o = y * rs + x * 4
+                      return ((buf.get(o).toInt() and 255) shl 16) or
+                          ((buf.get(o + 1).toInt() and 255) shl 8) or
+                          (buf.get(o + 2).toInt() and 255)
+                  }
+
+                  sampleReq?.let { req ->
+                      sampleReq = null
+                      val c = px(req.x.coerceIn(0, w - 1), req.y.coerceIn(0, h - 1))
+                      main.post { req.cb(c) }
+                  }
+
+                  if (!fishing && !loopOn) return
+                  val rg = region ?: return
+                  val tc = targetColor ?: return
+
+                  val l = rg[0].coerceIn(0, w - 2)
+                  val t = rg[1].coerceIn(0, h - 2)
+                  val r = rg[2].coerceIn(l + 1, w)
+                  val b = rg[3].coerceIn(t + 1, h)
+                  val tol = tolerance
+
+                  // Vertical minigame. Every row, every 2nd column.
+                  // kind: 1 = bar blue, 2 = white, 3 = near-black
+                  val rows = b - t
+                  val cols = (r - l + 1) / 2
+                  val kind = ByteArray(rows * cols)
+                  val colBlue = IntArray(cols)
+                  for (i in 0 until rows) {
+                      val yy = t + i
+                      val base = i * cols
+                      for (j in 0 until cols) {
+                          val xx = l + 2 * j
+                          if (xx >= r) break
+                          val c = px(xx, yy)
+                          if (match(c, tc, tol)) {
+                              kind[base + j] = 1
+                              colBlue[j]++
+                          } else {
+                              val cr = (c shr 16) and 255
+                              val cg = (c shr 8) and 255
+                              val cb = c and 255
+                              if (minOf(cr, cg, cb) >= 225) kind[base + j] = 2
+                              else if (maxOf(cr, cg, cb) < 60) kind[base + j] = 3
+                          }
+                      }
+                  }
+
+                  // The bar = the narrow set of columns that are full of blue.
+                  var maxB = 0
+                  for (j in 0 until cols) { if (colBlue[j] > maxB) maxB = colBlue[j] }
+                  val band = BooleanArray(cols)
+                  var nb = 0
+                  var tN = 0
+                  if (maxB >= MIN_COL) {
+                      for (j in 0 until cols) {
+                          if (colBlue[j] >= maxB * 0.4) { band[j] = true; nb++; tN += colBlue[j] }
+                      }
+                  }
+                  val visible = tN >= MIN_BLUE && nb in 1..maxOf(10, cols / 5)
+
+                  var zone = Double.NaN   // centre of the black gap (we move it: hold = up, release = down)
+                  var fish = Double.NaN   // the white line (we follow it)
+                  var gapLen = 0
+                  if (visible) {
+                      val blueRow = BooleanArray(rows)
+                      val darkRow = BooleanArray(rows)
+                      val whiteRow = BooleanArray(rows)
+                      val need = 0.8 * nb
+                      for (i in 0 until rows) {
+                          var nB = 0; var nD = 0; var nW = 0
+                          val base = i * cols
+                          for (j in 0 until cols) {
+                              if (!band[j]) continue
+                              when (kind[base + j].toInt()) { 1 -> nB++; 2 -> nW++; 3 -> nD++ }
+                          }
+                          blueRow[i] = nB >= 1
+                          darkRow[i] = nD >= need
+                          whiteRow[i] = nW >= need
+                      }
+                      // bar extent: first..last blue row, extended through the dark end caps / gap at the ends
+                      var top = 0
+                      while (top < rows - 1 && !blueRow[top]) top++
+                      var bot = rows - 1
+                      while (bot > 0 && !blueRow[bot]) bot--
+                      while (top > 0 && darkRow[top - 1]) top--
+                      while (bot < rows - 1 && darkRow[bot + 1]) bot++
+
+                      // zone = biggest stretch of non-blue rows inside the bar
+                      var bestS = 0; var bestLen = 0; var runS = -1
+                      for (k in top..bot) {
+                          if (!blueRow[k]) {
+                              if (runS < 0) runS = k
+                          } else if (runS >= 0) {
+                              if (k - runS > bestLen) { bestLen = k - runS; bestS = runS }
+                              runS = -1
+                          }
+                      }
+                      if (runS >= 0 && bot + 1 - runS > bestLen) { bestLen = bot + 1 - runS; bestS = runS }
+                      if (bestLen >= 4) { zone = t + bestS + (bestLen - 1) / 2.0; gapLen = bestLen }
+
+                      // fish = white line across the bar (cluster of white rows; if several, nearest to last time)
+                      var bestD = Double.MAX_VALUE
+                      fun consider(rel: Double) {
+                          val yy = t + rel
+                          val d = if (lastFish.isNaN()) 0.0 else abs(yy - lastFish)
+                          if (d < bestD) { bestD = d; fish = yy }
+                      }
+                      var cSum = 0.0; var cN = 0; var lastW = -10
+                      for (k in top..bot) {
+                          if (whiteRow[k]) {
+                              if (cN > 0 && k - lastW > 3) { consider(cSum / cN); cSum = 0.0; cN = 0 }
+                              cSum += k; cN++; lastW = k
+                          }
+                      }
+                      if (cN > 0) consider(cSum / cN)
+                  }
+                  if (!visible) lastFish = Double.NaN
+                  else if (!fish.isNaN()) lastFish = fish
+                  else if (!lastFish.isNaN()) fish = lastFish
+                  val target = fish
+                  val player = zone
+                  val nowMs = System.currentTimeMillis()
+
+                  if (loopOn) {
+                      when (phase) {
+                          Phase.CAST -> {
+                              releaseHold()
+                              main.postDelayed({ FisherAccessibilityService.instance?.tap(castX, castY) }, 200)
+                              phase = Phase.WAIT; phaseSince = nowMs; seen = 0
+                              setStatus("Cast! Waiting for a bite...", true)
+                              return
+                          }
+                          Phase.WAIT -> {
+                              seen = if (visible) seen + 1 else 0
+                              if (seen >= 3) {
+                                  phase = Phase.PLAY; lostSince = 0L; prevP = Double.NaN
+                              } else {
+                                  if (nowMs - phaseSince > BITE_TIMEOUT_MS) phase = Phase.CAST
+                                  setStatus("Waiting for a bite... (catches: $catches)")
+                                  return
+                              }
+                          }
+                          Phase.COOL -> {
+                              if (nowMs - phaseSince > COOLDOWN_MS) phase = Phase.CAST
+                              return
+                          }
+                          else -> {}
+                      }
+                      if (phase == Phase.PLAY) {
+                          if (visible) {
+                              lostSince = 0L
+                          } else {
+                              // brief gaps: keep doing whatever we were doing
+                              if (lostSince == 0L) lostSince = nowMs
+                              if (nowMs - lostSince > LOST_MS) {
+                                  releaseHold()
+                                  phase = Phase.COOL; phaseSince = nowMs; catches++
+                                  setStatus("Minigame over. Catches: $catches", true)
+                              }
+                              return
+                          }
+                      }
+                  }
+
+                  if (!visible) {
+                      releaseHold()
+                      prevP = Double.NaN
+                      setStatus("Waiting for minigame...")
+                      return
+                  }
+
+                  if (target.isNaN() || player.isNaN()) {
+                      setStatus("Bar found - looking for the fish line / gap...")
+                      return   // keep doing whatever we were doing
+                  }
+
+                  val now = System.nanoTime()
+                  var vel = 0.0
+                  if (!prevP.isNaN()) {
+                      val dt = (now - prevT) / 1e9
+                      if (dt > 0) vel = (player - prevP) / dt
+                  }
+                  prevP = player
+                  prevT = now
+
+                  val err = target - (player + vel * lead) // < 0: fish is above the zone -> hold (zone goes up)
+                  val dz = maxOf(deadzone, 0.12 * gapLen)
+                  if (!invert) {
+                      if (err < -dz) pressHold() else if (err > dz) releaseHold()
+                  } else {
+                      if (err > dz) pressHold() else if (err < -dz) releaseHold()
+                  }
+                  setStatus("fish=%.0f zone=%.0f err=%+.0f %s".format(
+                      target, player, err, if (state_held()) "HOLD" else "free"))
+              }
+
+              private fun state_held(): Boolean = holdingNow
+
+              private fun pressHold() {
+                  val s = FisherAccessibilityService.instance
+                  if (s == null) setStatus("Accessibility service is OFF") else { holdingNow = true; s.hold(holdX, holdY) }
+              }
+
+              private fun releaseHold() {
+                  holdingNow = false
+                  FisherAccessibilityService.instance?.release()
+              }
+
+              // ---------------------------------------------------------------- UI
+
+              private fun overlayLp(w: Int, h: Int, touchable: Boolean): WindowManager.LayoutParams {
+                  var flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
+                      WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
+                  if (!touchable) flags = flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                  return WindowManager.LayoutParams(
+                      w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT
+                  ).apply { gravity = Gravity.TOP or Gravity.START }
+              }
+
+              private class CrossView(ctx: Context) : View(ctx) {
+                  private val p = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                      color = Color.RED; style = Paint.Style.STROKE; strokeWidth = 4f
+                  }
+                  override fun onDraw(c: Canvas) {
+                      val cx = width / 2f; val cy = height / 2f
+                      c.drawCircle(cx, cy, width / 2f - 4, p)
+                      c.drawLine(cx, 8f, cx, height - 8f, p)
+                      c.drawLine(8f, cy, width - 8f, cy, p)
+                  }
+              }
+
+              private class BoxView(ctx: Context) : View(ctx) {
+                  private val p = Paint().apply {
+                      color = Color.GREEN; style = Paint.Style.STROKE; strokeWidth = 3f
+                  }
+                  override fun onDraw(c: Canvas) {
+                      c.drawRect(2f, 2f, width - 2f, height - 2f, p)
+                  }
+              }
+
+              private fun btn(label: String, onClick: () -> Unit) = Button(this).apply {
+                  text = label
+                  textSize = 11f
+                  isAllCaps = false
+                  minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
+                  setPadding(4, 0, 4, 0)
+                  setOnClickListener { onClick() }
+              }
+
+              private fun row(vararg bs: Button) = LinearLayout(this).apply {
+                  orientation = LinearLayout.HORIZONTAL
+                  bs.forEach { addView(it, LinearLayout.LayoutParams(0, 104, 1f)) }
+              }
+
+              private fun crossCenter(): IntArray =
+                  intArrayOf(crossLp.x + crossSize / 2, crossLp.y + crossSize / 2)
+
+              private fun buildOverlays() {
+                  val s = realMetrics()
+
+                  // region box
+                  box = BoxView(this)
+                  boxLp = overlayLp(10, 10, false)
+                  refreshBox()
+
+                  // crosshair (draggable)
+                  cross = CrossView(this)
+                  crossLp = overlayLp(crossSize, crossSize, true).apply { x = s[0] / 2; y = s[1] / 2 }
+                  cross.setOnTouchListener(dragListener(crossLp) { wm.updateViewLayout(cross, crossLp) })
+                  wm.addView(cross, crossLp)
+
+                  // panel
+                  status = TextView(this).apply { setTextColor(Color.WHITE); textSize = 11f; text = "Ready" }
+                  val header = TextView(this).apply {
+                      setTextColor(Color.WHITE); textSize = 12f; setPadding(12, 8, 12, 8)
+                      setBackgroundColor(0xFF444444.toInt())
+                      text = "GPO Fisher  (drag here)"
+                  }
+                  panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setBackgroundColor(0xCC202020.toInt())
+                      addView(header)
+                      addView(status)
+                      addView(row(
+                          btn("TL") { setCorner(true) },
+                          btn("BR") { setCorner(false) },
+                          btn("Hold pt") { setHoldPoint() }
+                      ))
+                      addView(row(
+                          btn("Blue bar") { sampleColor(true) }
+                      ))
+                      addView(row(
+                          btn("Cast pt") { setCastPoint() },
+                          btn("LOOP (auto)") { toggleLoop() }
+                      ))
+                      addView(row(
+                          btn("FISH") { toggleFishing() },
+                          btn("CLICK") { toggleClicker() },
+                          btn("HOLD") { toggleHold() }
+                      ))
+                      addView(row(
+                          btn("Invert") { invert = !invert; savePrefs(); setStatus("Invert = $invert", true) },
+                          btn("Tol-") { tolerance = (tolerance - 5).coerceAtLeast(5); savePrefs(); setStatus("Tol = $tolerance", true) },
+                          btn("Tol+") { tolerance = (tolerance + 5).coerceAtMost(40); savePrefs(); setStatus("Tol = $tolerance", true) }
+                      ))
+                      addView(row(btn("Exit") { stopSelf() }))
+                  }
+                  panelLp = overlayLp(560, WindowManager.LayoutParams.WRAP_CONTENT, true).apply { x = 20; y = 20 }
+                  header.setOnTouchListener(dragListener(panelLp) { wm.updateViewLayout(panel, panelLp) })
+                  wm.addView(panel, panelLp)
+              }
+
+              private fun dragListener(lp: WindowManager.LayoutParams, update: () -> Unit): View.OnTouchListener {
+                  var sx = 0f; var sy = 0f; var ox = 0; var oy = 0
+                  return View.OnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> { sx = e.rawX; sy = e.rawY; ox = lp.x; oy = lp.y }
+                          MotionEvent.ACTION_MOVE -> {
+                              lp.x = ox + (e.rawX - sx).toInt(); lp.y = oy + (e.rawY - sy).toInt(); update()
+                          }
+                      }
+                      true
+                  }
+              }
+
+              private fun refreshBox() {
+                  val rg = region ?: return
+                  boxLp.x = rg[0]; boxLp.y = rg[1]
+                  boxLp.width = (rg[2] - rg[0]).coerceAtLeast(4)
+                  boxLp.height = (rg[3] - rg[1]).coerceAtLeast(4)
+                  if (!boxAdded) { wm.addView(box, boxLp); boxAdded = true } else wm.updateViewLayout(box, boxLp)
+              }
+
+              private fun setCorner(topLeft: Boolean) {
+                  val c = crossCenter()
+                  val cur = region ?: intArrayOf(c[0], c[1], c[0] + 200, c[1] + 200)
+                  if (topLeft) { cur[0] = c[0]; cur[1] = c[1] } else { cur[2] = c[0]; cur[3] = c[1] }
+                  region = cur
+                  savePrefs(); refreshBox()
+                  setStatus("Region ${cur[0]},${cur[1]} -> ${cur[2]},${cur[3]}", true)
+              }
+
+              private fun setHoldPoint() {
+                  val c = crossCenter()
+                  holdX = c[0].toFloat(); holdY = c[1].toFloat()
+                  savePrefs()
+                  setStatus("Hold point ${c[0]},${c[1]}", true)
+              }
+
+              private fun setCastPoint() {
+                  val c = crossCenter()
+                  castX = c[0].toFloat(); castY = c[1].toFloat()
+                  savePrefs()
+                  setStatus("Cast point ${c[0]},${c[1]}", true)
+              }
+
+              private fun toggleLoop() {
+                  if (loopOn) { stopLoop(); setStatus("Loop OFF", true); return }
+                  if (region == null || targetColor == null) {
+                      setStatus("Set TL, BR and Blue bar first", true); return
+                  }
+                  if (castX < 0f) { setStatus("Set Cast pt first (tap on the sea)", true); return }
+                  if (holdX <= 0f) { setStatus("Set Hold pt first", true); return }
+                  fishing = false
+                  stopClickers()
+                  prevP = Double.NaN
+                  catches = 0
+                  cross.visibility = View.GONE
+                  if (boxAdded) box.visibility = View.GONE
+                  phase = Phase.CAST
+                  loopOn = true
+                  setStatus("Loop ON", true)
+              }
+
+              private fun stopLoop() {
+                  loopOn = false
+                  phase = Phase.OFF
+                  releaseHold()
+                  if (::cross.isInitialized) cross.visibility = View.VISIBLE
+                  if (boxAdded) box.visibility = View.VISIBLE
+              }
+
+              private fun sampleColor(isTarget: Boolean) {
+                  val c = crossCenter()
+                  setStatus("Sampling...", true)
+                  sampleReq = SampleReq(c[0], c[1]) { color ->
+                      if (isTarget) targetColor = color else playerColor = color
+                      savePrefs()
+                      setStatus("Blue bar color = #%06X".format(color and 0xFFFFFF), true)
+                  }
+              }
+
+              private fun toggleFishing() {
+                  fishing = !fishing
+                  prevP = Double.NaN
+                  if (fishing) {
+                      if (region == null || targetColor == null) {
+                          fishing = false
+                          setStatus("Set TL, BR and Blue bar first", true)
+                          return
+                      }
+                      stopClickers()
+                      cross.visibility = View.GONE
+                      if (boxAdded) box.visibility = View.GONE
+                      setStatus("Fishing ON", true)
+                  } else {
+                      releaseHold()
+                      cross.visibility = View.VISIBLE
+                      if (boxAdded) box.visibility = View.VISIBLE
+                      setStatus("Fishing OFF", true)
+                  }
+              }
+
+              private val clickRunnable = object : Runnable {
+                  override fun run() {
+                      if (!clickerOn) return
+                      FisherAccessibilityService.instance?.tap(holdX, holdY)
+                      main.postDelayed(this, clickMs)
+                  }
+              }
+
+              private fun stopClickers() {
+                  if (loopOn) stopLoop()
+                  clickerOn = false
+                  if (holdOn) { holdOn = false; releaseHold() }
+              }
+
+              private fun toggleClicker() {
+                  val turnOn = !clickerOn
+                  fishing = false
+                  stopClickers()
+                  if (turnOn) { clickerOn = true; main.post(clickRunnable) }
+                  setStatus("Auto-click ${if (clickerOn) "ON" else "OFF"} at hold point", true)
+              }
+
+              private fun toggleHold() {
+                  val turnOn = !holdOn
+                  fishing = false
+                  stopClickers()
+                  if (turnOn) { holdOn = true; pressHold() }
+                  setStatus("Hold ${if (holdOn) "ON" else "OFF"} at hold point", true)
+              }
+
+              private fun setStatus(t: String, force: Boolean = false) {
+                  val now = System.currentTimeMillis()
+                  if (!force && now - lastStatusMs < 150) return
+                  lastStatusMs = now
+                  main.post { if (::status.isInitialized) status.text = t }
+              }
+
+              // ---------------------------------------------------------------- prefs
+
+              private fun loadPrefs() {
+                  if (prefs.contains("l")) {
+                      region = intArrayOf(prefs.getInt("l", 0), prefs.getInt("t", 0), prefs.getInt("r", 0), prefs.getInt("b", 0))
+                  }
+                  if (prefs.contains("tc")) targetColor = prefs.getInt("tc", 0)
+                  if (prefs.contains("pc")) playerColor = prefs.getInt("pc", 0)
+                  holdX = prefs.getFloat("hx", 0f); holdY = prefs.getFloat("hy", 0f)
+                  castX = prefs.getFloat("cx", -1f); castY = prefs.getFloat("cy", -1f)
+                  tolerance = prefs.getInt("tol2", 20)
+                  invert = prefs.getBoolean("inv", false)
+              }
+
+              private fun savePrefs() {
+                  val e = prefs.edit()
+                  region?.let { e.putInt("l", it[0]).putInt("t", it[1]).putInt("r", it[2]).putInt("b", it[3]) }
+                  targetColor?.let { e.putInt("tc", it) }
+                  playerColor?.let { e.putInt("pc", it) }
+                  e.putFloat("hx", holdX).putFloat("hy", holdY)
+                  e.putFloat("cx", castX).putFloat("cy", castY)
+                  e.putInt("tol2", tolerance).putBoolean("inv", invert)
+                  e.apply()
+              }
+
+              // ---------------------------------------------------------------- teardown
+
+              override fun onDestroy() {
+                  loopOn = false
+                  phase = Phase.OFF
+                  fishing = false
+                  clickerOn = false
+                  releaseHold()
+                  main.removeCallbacksAndMessages(null)
+                  try { if (::panel.isInitialized) wm.removeView(panel) } catch (_: Exception) {}
+                  try { if (::cross.isInitialized) wm.removeView(cross) } catch (_: Exception) {}
+                  try { if (boxAdded) wm.removeView(box) } catch (_: Exception) {}
+                  vd?.release(); vd = null
+                  reader?.close(); reader = null
+                  projection?.stop(); projection = null
+                  if (::bgThread.isInitialized) bgThread.quitSafely()
+                  super.onDestroy()
+              }
+          }
+          EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+      - name: Build
+        working-directory: gpo_fisher_android
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GPOFisher-apk
+          path: gpo_fisher_android/app/build/outputs/apk/debug/app-debug.apk
